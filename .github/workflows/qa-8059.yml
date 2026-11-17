@@ -1,0 +1,63 @@
+name: P8017 datatype native
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Source commit to test
+        required: true
+        type: string
+      phase:
+        required: true
+        type: choice
+        options: [baseline, fixed]
+        default: baseline
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MAVEN_OPTS: -Xmx1024m
+      RUN_PHASE: ${{ inputs.phase }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-java@v6.1.0
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Build dependency modules
+        shell: bash
+        run: |
+          git rev-parse HEAD | tee native-head.txt
+          java -version 2>&1 | tee native-java.txt
+          mvn -B -pl extensions/wikibase -am -DskipTests install 2>&1 | tee native-build.log
+      - name: Format the changed module
+        shell: bash
+        run: |
+          mvn -B -pl extensions/wikibase formatter:format impsort:sort 2>&1 | tee native-format.log
+          git diff -- extensions/wikibase > native-formatting.patch
+      - name: Native oracle and module regression
+        shell: bash
+        run: |
+          if [ "$RUN_PHASE" = baseline ]; then
+            mvn -B -pl extensions/wikibase -Dtest=PreviewWikibaseSchemaCommandTest test 2>&1 | tee native-tests.log
+          else
+            mvn -B -pl extensions/wikibase test 2>&1 | tee native-tests.log
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qa8059-${{ inputs.phase }}
+          retention-days: 7
+          path: |
+            native-*.txt
+            native-*.log
+            native-formatting.patch
+            extensions/wikibase/target/surefire-reports

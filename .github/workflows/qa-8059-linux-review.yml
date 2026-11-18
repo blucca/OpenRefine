@@ -39,8 +39,8 @@ jobs:
           set -euo pipefail
           ARCHIVE="$GITHUB_WORKSPACE/packaging/target/openrefine-linux-3.10-SNAPSHOT.tar.gz"
           test -s "$ARCHIVE"
-          STAGING="$RUNNER_TEMP/qa-8059-package"
-          DATA="$RUNNER_TEMP/qa-8059-empty-data"
+          STAGING="$GITHUB_WORKSPACE/temp/qa-8059-package"
+          DATA="$GITHUB_WORKSPACE/temp/qa-8059-empty-data"
           mkdir -p "$STAGING" "$DATA"
           tar -xzf "$ARCHIVE" -C "$STAGING"
           PACKAGE="$STAGING/openrefine-3.10-SNAPSHOT"
@@ -70,7 +70,7 @@ jobs:
           trap 'kill "$pid" 2>/dev/null || true' EXIT
           health=000
           for attempt in $(seq 1 30); do
-            health=$(curl --connect-timeout 1 --max-time 3 -s -o "$RUNNER_TEMP/qa-8059-index.html" -w '%{http_code}' http://127.0.0.1:3334/ || true)
+            health=$(curl --connect-timeout 1 --max-time 3 -s -o "$GITHUB_WORKSPACE/temp/qa-8059-index.html" -w '%{http_code}' http://127.0.0.1:3334/ || true)
             if [ "$health" = 200 ]; then break; fi
             if ! kill -0 "$pid" 2>/dev/null; then cat "$GITHUB_WORKSPACE/review-boot.log"; exit 1; fi
             sleep 2
@@ -94,7 +94,7 @@ jobs:
               'archive_name': asset.name, 'archive_bytes': asset.stat().st_size,
               'packaged_checker_class': True, 'packaged_translation': True,
               'official_license_files': True, 'health_http_status': 200,
-              'port': 3334, 'data_directory': 'new empty RUNNER_TEMP/qa-8059-empty-data',
+              'port': 3334, 'data_directory': 'new empty GITHUB_WORKSPACE/temp/qa-8059-empty-data',
               'boot_process_stopped': True, 'tag': os.environ['REVIEW_TAG'],
               'upstream_pr': 'https://github.com/OpenRefine/OpenRefine/pull/8091',
               'native_suite_run': 'https://github.com/blucca/OpenRefine/actions/runs/44206740676',

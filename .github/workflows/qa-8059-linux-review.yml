@@ -1,0 +1,153 @@
+name: P8017 unofficial Linux review archive
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  linux-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MAVEN_OPTS: -Xmx1024m
+      REVIEW_SOURCE: aa8f9c8065c13d0b0852899fb9764539cbed199e
+      REVIEW_TAG: qa-8059-aa8f9c8
+      REVIEW_ASSET: openrefine-linux-8059-review-aa8f9c8.tar.gz
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: aa8f9c8065c13d0b0852899fb9764539cbed199e
+      - uses: actions/setup-java@v6.1.0
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Build the official single Linux assembly
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | tee review-head.txt
+          test "$(cat review-head.txt)" = "$REVIEW_SOURCE"
+          java -version 2>&1 | tee review-java.txt
+          npm --prefix main/webapp install 2>&1 | tee review-npm.log
+          mvn -B -DskipTests -DskipDefaultProfile=true -Dskip.mac.packaging=true -P linux package 2>&1 | tee review-build.log
+      - name: Verify packaged warning and boot with Java 21
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="$GITHUB_WORKSPACE/packaging/target/openrefine-linux-3.10-SNAPSHOT.tar.gz"
+          test -s "$ARCHIVE"
+          STAGING="$RUNNER_TEMP/qa-8059-package"
+          DATA="$RUNNER_TEMP/qa-8059-empty-data"
+          mkdir -p "$STAGING" "$DATA"
+          tar -xzf "$ARCHIVE" -C "$STAGING"
+          PACKAGE="$STAGING/openrefine-3.10-SNAPSHOT"
+          test -x "$PACKAGE/refine"
+          test -s "$PACKAGE/LICENSE.txt"
+          test -s "$PACKAGE/licenses.xml"
+          test -d "$PACKAGE/licenses"
+          jar tf "$PACKAGE/webapp/extensions/wikibase/module/MOD-INF/lib/openrefine-wikidata.jar" |
+            grep -Fx 'org/openrefine/wikibase/qa/scrutinizers/PropertyDatatypeScrutinizer.class' |
+            tee review-class.txt
+          export PACKAGE
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path(os.environ['PACKAGE']) / 'webapp/extensions/wikibase/module/langs/translation-en.json'
+          translations = json.loads(p.read_text())
+          prefix = 'warnings-messages/property-datatype-mismatch/'
+          title, body = translations[prefix + 'title'], translations[prefix + 'body']
+          assert '{property_entity}' in title
+          assert '{expected_entity_type}' in body and '{actual_entity_type}' in body
+          assert 'adjust the property in the schema before exporting or uploading' in body
+          Path('review-translation.json').write_text(json.dumps({'title': title, 'body': body}, indent=2) + '\n')
+          PY
+          cd "$PACKAGE"
+          ./refine -w webapp -p 3334 -d "$DATA" -x refine.headless=true > "$GITHUB_WORKSPACE/review-boot.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          health=000
+          for attempt in $(seq 1 30); do
+            health=$(curl --connect-timeout 1 --max-time 3 -s -o "$RUNNER_TEMP/qa-8059-index.html" -w '%{http_code}' http://127.0.0.1:3334/ || true)
+            if [ "$health" = 200 ]; then break; fi
+            if ! kill -0 "$pid" 2>/dev/null; then cat "$GITHUB_WORKSPACE/review-boot.log"; exit 1; fi
+            sleep 2
+          done
+          test "$health" = 200
+          kill "$pid"
+          wait "$pid" || true
+          trap - EXIT
+          cd "$GITHUB_WORKSPACE"
+          mv "$ARCHIVE" "$REVIEW_ASSET"
+          python3 - <<'PY'
+          import datetime, json, os
+          from pathlib import Path
+          asset = Path(os.environ['REVIEW_ASSET'])
+          receipt = {
+              'status': 'build_package_java21_boot_pass',
+              'source_head': Path('review-head.txt').read_text().strip(),
+              'run_id': int(os.environ['GITHUB_RUN_ID']),
+              'run_url': f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              'java': Path('review-java.txt').read_text(),
+              'archive_name': asset.name, 'archive_bytes': asset.stat().st_size,
+              'packaged_checker_class': True, 'packaged_translation': True,
+              'official_license_files': True, 'health_http_status': 200,
+              'port': 3334, 'data_directory': 'new empty RUNNER_TEMP/qa-8059-empty-data',
+              'boot_process_stopped': True, 'tag': os.environ['REVIEW_TAG'],
+              'upstream_pr': 'https://github.com/OpenRefine/OpenRefine/pull/8091',
+              'native_suite_run': 'https://github.com/blucca/OpenRefine/actions/runs/44206740676',
+              'native_suite_tests': 596,
+              'completed_utc': datetime.datetime.now(datetime.timezone.utc).isoformat()
+          }
+          Path('review-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          print(json.dumps(receipt, indent=2))
+          PY
+      - name: Publish explicitly unofficial review prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          r = json.loads(Path('review-receipt.json').read_text())
+          notes = f"""Unofficial Linux review build for [OpenRefine PR #8091](https://github.com/OpenRefine/OpenRefine/pull/8091). This is a review artifact from blucca/OpenRefine, not an official OpenRefine release.
+
+          Source commit: `{r['source_head']}`. The proposed fix adds a warning when an entity-valued property expects Form (or another known entity kind) and receives an Item (or another mismatching kind).
+
+          Native Wikibase affected-module acceptance: [run 44206740676](https://github.com/blucca/OpenRefine/actions/runs/44206740676), 91 suites / 596 tests / 0 failures / 0 errors / 0 skipped. Baseline run 44201853782 failed the two intended P8017 Item-to-Form preview assertions; legal Item controls passed. This archive's official Linux assembly, packaged checker/translation/license checks, and actual Java21 HTTP 200 boot smoke passed in [run {r['run_id']}]({r['run_url']}). Asset size: {r['archive_bytes']} bytes.
+
+          Java 21 or later is required; the Linux archive uses your installed Java runtime. Extract it into a separate folder. Start a separate review instance with a fresh data directory:
+
+          ```sh
+          mkdir -p "$HOME/.local/share/openrefine-8059-review"
+          ./refine -w webapp -p 3334 -d "$HOME/.local/share/openrefine-8059-review"
+          ```
+
+          Open http://127.0.0.1:3334/ and use that review instance for your own project/schema preview. The datatype warning names the property, expected kind, and supplied kind, and prompts a schema/value correction before export or upload. This build keeps the existing editor/export capabilities.
+
+          The original author's own Generational Suffix preview, workflow correction and next export are awaiting their run. The package smoke used a new empty data directory and HTTP entry check; it submitted no Wikidata edit.
+          """
+          Path('review-release-notes.md').write_text(notes)
+          PY
+          gh release create "$REVIEW_TAG" "$REVIEW_ASSET" --repo "$GITHUB_REPOSITORY" --target "$REVIEW_SOURCE" --prerelease --title 'Unofficial Linux review build for OpenRefine #8059 (aa8f9c8)' --notes-file review-release-notes.md
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$REVIEW_TAG" --jq '{id,html_url,tag_name,target_commitish,prerelease,draft,published_at,assets:[.assets[]|{name,size,state,browser_download_url}]}' > review-release.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qa8059-linux-review-receipts
+          retention-days: 7
+          path: |
+            review-head.txt
+            review-java.txt
+            review-npm.log
+            review-build.log
+            review-class.txt
+            review-translation.json
+            review-boot.log
+            review-receipt.json
+            review-release.json
+            review-release-notes.md
